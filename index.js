@@ -215,8 +215,8 @@ if( swearWords.some(word => message.content.includes(word)) ) {
     .setDescription("Help Commands")
     .setColor("#268ccf")
     .setThumbnail(bicon)
-    .addField("Moderation Commands","/kick (user) (reason) - Kick a User.\n/ban (user) (reason) - Ban a User.\n/report (user) (reason) - report about User.\n/warn (user) (reason) - Warn a User.")
-    .addField("Server Commands","/serverinfo - Server Informations.\n/membercount - Member Count.\n/say (message) - say your message.\n/poll (question) - Poll about Question\n/avatar @user - Avatar of the user.\n/ping - Ping Pong");
+    .addField("Moderation Commands","?kick (user) (reason) - Kick a User.\n?ban (user) (reason) - Ban a User.\n?report (user) (reason) - report about User.\n?warn (user) (reason) - Warn a User.")
+    .addField("Server Commands","?serverinfo - Server Informations.\n?membercount - Member Count.\n?say (message) - say your message.\n?poll (question) - Poll about Question\n?avatar @user - Avatar of the user.\n?ping - Ping Pong");
 
     return message.author.send(botembed);
   }
@@ -289,19 +289,19 @@ if(message.content.startsWith(prefix + "avatar ")) { //IF for the command.
  }});
 
 bot.on('message', msg => {
-  if (msg.content === '/ping') {
+  if (msg.content === '?ping') {
     msg.reply(`Pong! The ping is **${(bot.ping).toFixed(0)}**ms!  :ping_pong:`)
   }
 });
 
 bot.on('message', msg => {
-  if (msg.content === '/help') {
+  if (msg.content === '?help') {
     msg.reply(`Check your Direct Messages!`)
   }
 });
 
 bot.on('message', msg => {
-  if (msg.content === '/avatar') {
+  if (msg.content === '?avatar') {
     msg.reply(`You need Mention someone`)
   }
 });
