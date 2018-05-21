@@ -1,309 +1,194 @@
-const botconfig = require("./botconfig.json");
-const color = require("./color.json");
-const Discord = require("discord.js");
+const { Client, Util } = require('discord.js');
+const { TOKEN, PREFIX, GOOGLE_API_KEY } = require('./config');
+const YouTube = require('simple-youtube-api');
+const ytdl = require('ytdl-core');
 
-const bot = new Discord.Client({disableEveryone: true});
+const client = new Client({ disableEveryone: true });
 
-const swearWords = ["fuck", "shit", "זונה", "חרא"];
+const youtube = new YouTube(GOOGLE_API_KEY);
 
-bot.on("ready", async () => {
-  console.log(`Bot is Online!`);
-bot.user.setActivity(`${bot.guilds.size} servers | ?help`, {type: "WATCHING"});
+const queue = new Map();
+
+client.on('warn', console.warn);
+
+client.on('error', console.error);
+
+client.on('ready', () => console.log('Yo this ready!'));
+
+client.on('disconnect', () => console.log('I just disconnected, making sure you know, I will reconnect now...'));
+
+client.on('reconnecting', () => console.log('I am reconnecting now!'));
+
+client.on('message', async msg => { // eslint-disable-line
+	if (msg.author.bot) return undefined;
+	if (!msg.content.startsWith(PREFIX)) return undefined;
+
+	const args = msg.content.split(' ');
+	const searchString = args.slice(1).join(' ');
+	const url = args[1] ? args[1].replace(/<(.+)>/g, '$1') : '';
+	const serverQueue = queue.get(msg.guild.id);
+
+	let command = msg.content.toLowerCase().split(' ')[0];
+	command = command.slice(PREFIX.length)
+
+	if (command === 'play') {
+		const voiceChannel = msg.member.voiceChannel;
+		if (!voiceChannel) return msg.channel.send('I\'m sorry but you need to be in a voice channel to play music!');
+		const permissions = voiceChannel.permissionsFor(msg.client.user);
+		if (!permissions.has('CONNECT')) {
+			return msg.channel.send('I cannot connect to your voice channel, make sure I have the proper permissions!');
+		}
+		if (!permissions.has('SPEAK')) {
+			return msg.channel.send('I cannot speak in this voice channel, make sure I have the proper permissions!');
+		}
+
+		if (url.match(/^https?:\/\/(www.youtube.com|youtube.com)\/playlist(.*)$/)) {
+			const playlist = await youtube.getPlaylist(url);
+			const videos = await playlist.getVideos();
+			for (const video of Object.values(videos)) {
+				const video2 = await youtube.getVideoByID(video.id); // eslint-disable-line no-await-in-loop
+				await handleVideo(video2, msg, voiceChannel, true); // eslint-disable-line no-await-in-loop
+			}
+			return msg.channel.send(`✅ Playlist: **${playlist.title}** has been added to the queue!`);
+		} else {
+			try {
+				var video = await youtube.getVideo(url);
+			} catch (error) {
+				try {
+					var videos = await youtube.searchVideos(searchString, 10);
+					let index = 0;
+					msg.channel.send(`
+__**Song selection:**__
+${videos.map(video2 => `**${++index} -** ${video2.title}`).join('\n')}
+Please provide a value to select one of the search results ranging from 1-10.
+					`);
+					// eslint-disable-next-line max-depth
+					try {
+						var response = await msg.channel.awaitMessages(msg2 => msg2.content > 0 && msg2.content < 11, {
+							maxMatches: 1,
+							time: 10000,
+							errors: ['time']
+						});
+					} catch (err) {
+						console.error(err);
+						return msg.channel.send('No or invalid value entered, cancelling video selection.');
+					}
+					const videoIndex = parseInt(response.first().content);
+					var video = await youtube.getVideoByID(videos[videoIndex - 1].id);
+				} catch (err) {
+					console.error(err);
+					return msg.channel.send('🆘 I could not obtain any search results.');
+				}
+			}
+			return handleVideo(video, msg, voiceChannel);
+		}
+	} else if (command === 'skip') {
+		if (!msg.member.voiceChannel) return msg.channel.send('You are not in a voice channel!');
+		if (!serverQueue) return msg.channel.send('There is nothing playing that I could skip for you.');
+		serverQueue.connection.dispatcher.end('Skip command has been used!');
+		return undefined;
+	} else if (command === 'stop') {
+		if (!msg.member.voiceChannel) return msg.channel.send('You are not in a voice channel!');
+		if (!serverQueue) return msg.channel.send('There is nothing playing that I could stop for you.');
+		serverQueue.songs = [];
+		serverQueue.connection.dispatcher.end('Stop command has been used!');
+		return undefined;
+	} else if (command === 'volume') {
+		if (!msg.member.voiceChannel) return msg.channel.send('You are not in a voice channel!');
+		if (!serverQueue) return msg.channel.send('There is nothing playing.');
+		if (!args[1]) return msg.channel.send(`The current volume is: **${serverQueue.volume}**`);
+		serverQueue.volume = args[1];
+		serverQueue.connection.dispatcher.setVolumeLogarithmic(args[1] / 5);
+		return msg.channel.send(`I set the volume to: **${args[1]}**`);
+	} else if (command === 'np') {
+		if (!serverQueue) return msg.channel.send('There is nothing playing.');
+		return msg.channel.send(`🎶 Now playing: **${serverQueue.songs[0].title}**`);
+	} else if (command === 'queue') {
+		if (!serverQueue) return msg.channel.send('There is nothing playing.');
+		return msg.channel.send(`
+__**Song queue:**__
+${serverQueue.songs.map(song => `**-** ${song.title}`).join('\n')}
+**Now playing:** ${serverQueue.songs[0].title}
+		`);
+	} else if (command === 'pause') {
+		if (serverQueue && serverQueue.playing) {
+			serverQueue.playing = false;
+			serverQueue.connection.dispatcher.pause();
+			return msg.channel.send('⏸ Paused the music for you!');
+		}
+		return msg.channel.send('There is nothing playing.');
+	} else if (command === 'resume') {
+		if (serverQueue && !serverQueue.playing) {
+			serverQueue.playing = true;
+			serverQueue.connection.dispatcher.resume();
+			return msg.channel.send('▶ Resumed the music for you!');
+		}
+		return msg.channel.send('There is nothing playing.');
+	}
+
+	return undefined;
 });
 
-// Updates the bot's status if he joins a server
-bot.on("guildCreate", guild => {
-bot.user.setActivity(`${bot.guilds.size} servers | ?help`, {type: "WATCHING"});
-});
+async function handleVideo(video, msg, voiceChannel, playlist = false) {
+	const serverQueue = queue.get(msg.guild.id);
+	console.log(video);
+	const song = {
+		id: video.id,
+		title: Util.escapeMarkdown(video.title),
+		url: `https://www.youtube.com/watch?v=${video.id}`
+	};
+	if (!serverQueue) {
+		const queueConstruct = {
+			textChannel: msg.channel,
+			voiceChannel: voiceChannel,
+			connection: null,
+			songs: [],
+			volume: 5,
+			playing: true
+		};
+		queue.set(msg.guild.id, queueConstruct);
 
-/// Updates the bot's status if he leaves a servers
-bot.on("guildDelete", guild => {
-bot.user.setActivity(
-        `${bot.guilds.size} servers | ?help`, {type: "WATCHING"});
-});
+		queueConstruct.songs.push(song);
 
-//welcome join
-bot.on('guildMemberAdd', member => {
-  const channel = member.guild.channels.find('name', 'welcome');
-  if (!channel) return;
-  channel.send(`Welcome to the server, ${member}`);
-});
-
-//welcome left
-bot.on('guildMemberRemove', member => {
-  const channel = member.guild.channels.find('name', 'welcome');
-  if (!channel) return;
-  channel.send(`${member}, left the Server`);
-});
-
-bot.on("message", async message => {
-  if(message.author.bot) return;
-  if(message.channel.type === "dm") return;
-
-  let prefix = botconfig.prefix;
-  let messageArray = message.content.split(" ");
-  let cmd = messageArray[0];
-  let args = messageArray.slice(1);
-
-  if(cmd === `${prefix}kick`){
-
-    //!kick @user break the rules
-    let kUser = message.guild.member(message.mentions.users.first() || message.guild.members.get(args[0]));
-    if(!kUser) return message.channel.send("/kick [user] [reason]");
-    let kReason = args.join(" ").slice(22);
-    if(!message.member.hasPermission("MANAGE_MESSAGES")) return message.channel.send("No can do pal!");
-    if(kUser.hasPermission("MANAGE_MESSAGES")) return message.channel.send("That person can't be kicked!");
-
-    let kickEmbed = new Discord.RichEmbed()
-    .setDescription("**Kick**")
-    .setColor("#d83c3c")
-    .addField("User", `${kUser}`)
-    .addField("Staff", `<@${message.author.id}>`)
-    .addField("Reason", kReason);
-
-    let kickChannel = message.guild.channels.find(`name`, "logs");
-    if(!kickChannel) return message.channel.send("Can't find channel called `logs`");
-
-    message.guild.member(kUser).kick(kReason);
-    kickChannel.send(kickEmbed);
-
-    return;
-  }
-
-if( swearWords.some(word => message.content.includes(word)) ) {
-     message.delete();
-  message.reply("Swearing is not Allowed here");
-  //Or just do message.delete();
+		try {
+			var connection = await voiceChannel.join();
+			queueConstruct.connection = connection;
+			play(msg.guild, queueConstruct.songs[0]);
+		} catch (error) {
+			console.error(`I could not join the voice channel: ${error}`);
+			queue.delete(msg.guild.id);
+			return msg.channel.send(`I could not join the voice channel: ${error}`);
+		}
+	} else {
+		serverQueue.songs.push(song);
+		console.log(serverQueue.songs);
+		if (playlist) return undefined;
+		else return msg.channel.send(`✅ **${song.title}** has been added to the queue!`);
+	}
+	return undefined;
 }
 
-  if(cmd === `${prefix}ban`){
+function play(guild, song) {
+	const serverQueue = queue.get(guild.id);
 
-    let bUser = message.guild.member(message.mentions.users.first() || message.guild.members.get(args[0]));
-    if(!bUser) return message.channel.send("/ban [user] [reason]");
-    let bReason = args.join(" ").slice(22);
-    if(!message.member.hasPermission("MANAGE_MEMBERS")) return message.channel.send("No can do pal!");
-    if(bUser.hasPermission("MANAGE_MESSAGES")) return message.channel.send("That person can't be kicked!");
+	if (!song) {
+		serverQueue.voiceChannel.leave();
+		queue.delete(guild.id);
+		return;
+	}
+	console.log(serverQueue.songs);
 
-    let banEmbed = new Discord.RichEmbed()
-    .setDescription("**Ban**")
-    .setColor("#bc0000")
-    .addField("**User**", `${bUser}`)
-    .addField("**Staff**", `<@${message.author.id}>`)
-    .addField("Reason", bReason);
+	const dispatcher = serverQueue.connection.playStream(ytdl(song.url))
+		.on('end', reason => {
+			if (reason === 'Stream is not generating quickly enough.') console.log('Song ended.');
+			else console.log(reason);
+			serverQueue.songs.shift();
+			play(guild, serverQueue.songs[0]);
+		})
+		.on('error', error => console.error(error));
+	dispatcher.setVolumeLogarithmic(serverQueue.volume / 5);
 
-    let incidentchannel = message.guild.channels.find(`name`, "logs");
-    if(!incidentchannel) return message.channel.send("Can't find channel called `logs`");
-
-    message.guild.member(bUser).ban(bReason);
-    incidentchannel.send(banEmbed);
-
-    return;
-  }
-
-  if(cmd === `${prefix}report`){
-
-    //!report @user this is the reason
-    let rUser = message.guild.member(message.mentions.users.first() || message.guild.members.get(args[0]));
-    if(!rUser) return message.channel.send("/report [user] [reason]");
-    let rreason = args.join(" ").slice(22);
-
-    let reportEmbed = new Discord.RichEmbed()
-    .setDescription("Reports")
-    .setColor("#ffdc00")
-    .addField("User", `${rUser}`)
-    .addField("Staff", `${message.author}`)
-    .addField("Reason", rreason);
-
-    let reportschannel = message.guild.channels.find(`name`, "logs");
-    if(!reportschannel) return message.channel.send("Couldn't find channel called `logs`");
-
-    message.delete().catch(O_o=>{});
-    reportschannel.send(reportEmbed);
-
-    return;
-  }
-
-  if(cmd === `${prefix}warn`){
-
-    //!warn @user this is the reason
-    let rUser = message.guild.member(message.mentions.users.first() || message.guild.members.get(args[0]));
-    if(!rUser) return message.channel.send("/warn [user] [reason]");
-    let rreason = args.join(" ").slice(22);
-
-    let reportEmbed = new Discord.RichEmbed()
-    .setDescription("Warnings")
-    .setColor("#1b8fbd")
-    .addField("User", `${rUser}`)
-    .addField("Staff", `${message.author}`)
-    .addField("Reason", rreason);
-
-    let reportschannel = message.guild.channels.find(`name`, "logs");
-    if(!reportschannel) return message.channel.send("Couldn't find channel called `logs`");
-
-    message.delete().catch(O_o=>{});
-    reportschannel.send(reportEmbed);
-
-    return;
-  }
-
-  if(cmd === `${prefix}serverinfo`){
-
-    let sicon = message.guild.iconURL;
-    let serverembed = new Discord.RichEmbed()
-    .setDescription("Server Information")
-    .setColor("#15f153")
-    .setThumbnail(sicon)
-    .addField("Server Name", message.guild.name)
-    .addField("Created On", message.guild.createdAt)
-    .addField("You Joined", message.member.joinedAt)
-    .addField("Total Members", message.guild.memberCount);
-
-    return message.channel.send(serverembed);
-  }
-
-  if(cmd === `${prefix}membercount`){
-
-    let sicon = message.guild.iconURL;
-    let serverembed = new Discord.RichEmbed()
-    .setDescription("**Member Count**")
-    .setColor("#eb8f1b")
-    .setThumbnail(sicon)
-    .addField("Members", message.guild.memberCount);
-
-    return message.channel.send(serverembed);
-  }
-
-  if (cmd === `${prefix}poll`){
- 		message.delete()
-  let question = args.slice(0).join(" ");
-
-  if (args.length === 0)
-  return message.reply('Invalid Format: /poll <Question>')
-
-  const embed = new Discord.RichEmbed()
-  .setTitle("A Poll Has Been Started!")
-  .setColor("#5599ff")
-    .setDescription(`${question}`)
-    .setFooter(`Poll Started By: ${message.author.username}`, `${message.author.avatarURL}`)
-  const pollTopic = await message.channel.send({embed});
-  await pollTopic.react(`ג…`);
-  await pollTopic.react(`ג`);
-  const filter = (reaction) => reaction.emoji.name === 'ג…';
-  const collector = pollTopic.createReactionCollector(filter, { time: 15000 });
-  collector.on('collect', r => console.log(`Collected ${r.emoji.name}`));
-  collector.on('end', collected => console.log(`Collected ${collected.size} items`));
+	serverQueue.textChannel.send(`🎶 Start playing: **${song.title}**`);
 }
 
-  if (cmd === `${prefix}say`){
- 		message.delete()
- 		message.channel.send(args.join(" "));
-}
-
-  if (cmd === `${prefix}creator`){
-    let botembed = new Discord.RichEmbed()
-    .setDescription("Creators of the Bot")
-    .setColor("#ff9f04")
-    .addField("\nCreators","<@354952398772371458>\n<@311604263379795970>")
-
-    return message.channel.send(botembed);
-}
-
-  if(cmd === `${prefix}help`){
-
-    let bicon = bot.user.displayAvatarURL;
-    let botembed = new Discord.RichEmbed()
-    .setDescription("Help Commands")
-    .setColor("#268ccf")
-    .setThumbnail(bicon)
-    .addField("Moderation Commands","?kick (user) (reason) - Kick a User.\n?ban (user) (reason) - Ban a User.\n?report (user) (reason) - report about User.\n?warn (user) (reason) - Warn a User.")
-    .addField("Server Commands","?serverinfo - Server Informations.\n?membercount - Member Count.\n?say (message) - say your message.\n?poll (question) - Poll about Question\n?avatar @user - Avatar of the user.\n?ping - Ping Pong");
-
-    return message.author.send(botembed);
-  }
-  if(cmd === `${prefix}mute`){
-
-   if (!message.member.hasPermission('MANAGE_MESSAGES')) return errors.noPermissions(message, 'MANAGE_MESSAGES');
-
-  let user = message.guild.member(message.mentions.members.first());
-  if (!user) return errors.invalidUser(message);
-  if (user.hasPermission('MANAGE_MESSAGES')) return errors.cannotPunish(message);
-
-  let reason = args.slice(1).join(" ");
-  if (!reason) return errors.invalidReason(message);
-
-  let muterole = message.guild.roles.find('name', 'Muted');
-  if (!muterole) {
-    try {
-      muterole = await message.guild.createRole({
-        name: 'Muted',
-        color: "#000000",
-        permissions:[]
-      })
-      message.guild.channels.forEach(async (channel, id) => {
-        await channel.overwritePermissions(muterole, {
-          SEND_MESSAGES: false,
-          ADD_REACTIONS: false,
-          SPEAK: false
-        });
-      });
-    } catch(e) {
-      console.log(e.stack);
-    }
-  };
-
-  let time = args[1];
-  if (!time) return errors.invalidTime(message);
-
-  let embed = new Discord.RichEmbed()
-  .setTitle('User has been Temporarily Muted')
-  .setColor("#FF0000")
-  .addField('User', `${user}`, true)
-  .addField('Staff', `${message.author}`, true)
-  .addField('Time', time)
-  .addField('Reason', reason);
-
-  let auditlogchannel = message.guild.channels.find('name', 'logs');
-  if (!auditlogchannel) return errors.noLogChannel(message);
-
-  message.delete().catch(O_o=>{});
-  auditlogchannel.send(embed)
-
-  await(user.addRole(muterole.id));
-  };
-});
-
-const prefix = botconfig.prefix;
-bot.on("message", (message) => {
-
-  if(!message.content.startsWith(prefix)) return;
-
-if(message.content.startsWith(prefix + "avatar ")) { //IF for the command.
-     if(message.mentions.users.first()) { //Check if the message has a mention in it.
-           let user = message.mentions.users.first(); //Since message.mentions.users returns a collection; we must use the first() method to get the first in the collection.
-           let output = user.tag /*Nickname and Discriminator*/ +
-           "\nAvatar URL: " + user.avatarURL; /*The Avatar URL*/
-           message.channel.sendMessage(output); //We send the output in the current channel.
-    } else {
-          message.reply("Invalid user."); //Reply with a mention saying "Invalid user."
-    }
- }});
-
-bot.on('message', msg => {
-  if (msg.content === '?ping') {
-    msg.reply(`Pong! The ping is **${(bot.ping).toFixed(0)}**ms!  :ping_pong:`)
-  }
-});
-
-bot.on('message', msg => {
-  if (msg.content === '?help') {
-    msg.reply(`Check your Direct Messages!`)
-  }
-});
-
-bot.on('message', msg => {
-  if (msg.content === '?avatar') {
-    msg.reply(`You need Mention someone`)
-  }
-});
-
-bot.login(process.env.BOT_TOKEN);
+client.login(TOKEN);
